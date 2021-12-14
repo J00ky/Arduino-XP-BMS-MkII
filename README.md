@@ -1,13 +1,25 @@
-Arduino-XP-BMS  v1.7 2020-11-16
+Arduino-XP-BMS-MkII 
+Rev. 0.9 - 2021-12-11
 -------------------------------
-A BMS for Valence XP batteries, designed to run on Arduino or similar hardware.  
-by Seb Francis -> https://diysolarforum.com/members/seb303.13166/
+A BMS for Valence XP batteries, designed to run on Arduino or similar hardware.
+Merger of original Seb code and portions of Crelex's Valence Battery Reader code by Daren T.
+https://github.com/J00ky/Arduino-XP-BMS-MkII
 
+Original code by Seb Francis -> https://diysolarforum.com/members/seb303.13166/
 https://github.com/seb303/Arduino-XP-BMS
+
+Crelex's Valence Battery Reader code
+https://github.com/Crelex/Valance-Battery-Reader
 
 Overview
 --------
-Designed to provide monitoring of Valence XP batteries in order to:
+The MkII version of the Arduino XP BMS has the following features:
+* Automatically searches for battery modules and identifies their ID numbers.
+* Identified modules are listed by ID#, model type, and serial number during initial communications.
+* Compatible for Rev. 1 (black) and Rev. 2 (green) models.
+* Any comms failure, including BMS disconnection, will result in BMS sending the wakeup command but battery system config info is retained for faster system recovery.
+
+Still designed to provide monitoring of Valence XP batteries in order to:
 * Keep the Valence internal BMS awake so the intra-module balancing is active.
 * Provide a signal to a charge controller to disable charging in case of individual cell over-voltage or over-temperature.
 * Provide a signal to a load disconnect relay in case of individual cell under-voltage or over-temperature.
@@ -17,9 +29,9 @@ Designed to provide monitoring of Valence XP batteries in order to:
 
 Current Limitations
 -------------------
-* Does not handle inter-battery balancing, so only suitable for parallel installations.
-* Only supports 4 cell / 12V batteries.
-* No checking of low temperature (ideally the charge controller should have an external sensor to reduce current at low temperatures).
+* Does not handle inter-battery balancing, so only suitable for parallel installations. Balancing code still needs debugging.
+* Only up to 6 cell / 19V batteries.
+* Low temperature checking code added but not implemented or validated.
 
 Hardware
 --------
@@ -47,10 +59,10 @@ Installation & Configuration
 * Select board and clock rate (e.g. 24 MHz is plenty fast enough).
 * Define the pin numbers where the outputs and RS485 driver are connected.
 * Define other board-specific parameters, such as port for Serial Monitor, EEPROM size, etc.
-* List the battery ids in the batteries array.
 * Configure the desired thresholds for voltage, temperature and SOC.  
   The default settings are quite conservative, chosen to maximise battery life rather than squeeze out every last Ah of
   capacity. The values used by the official Valence U-BMS are much less conservative, and are shown in the comments.
+* This version will automatically populate the battery modules with their unique IDs.
 
 Console interface
 -----------------
