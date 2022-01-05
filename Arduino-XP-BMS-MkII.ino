@@ -1,9 +1,9 @@
 // Arduino-XP-BMS-MkII 
-// Rev. 0.9 - 2021-12-11
+// Rev. 0.9.5 - 2022-01-04
 // -------------------------------
 // A BMS for Valence XP batteries, designed to run on Arduino or similar hardware.
 // Merger of original Seb code and Crelex's Valence Battery Reader code by Daren T.
-// https://github.com/MrDarenT/Arduino-XP-BMS-MkII
+// https://github.com/J00ky/Arduino-XP-BMS-MkII
 //
 // Original code by Seb Francis -> https://diysolarforum.com/members/seb303.13166/
 // https://github.com/seb303/Arduino-XP-BMS
@@ -19,6 +19,19 @@
 //     /_/
 // https://github.com/t3chN0Mad/OpenXPBMS
 //
+// MkII v.0.9.5
+// ----------
+// * "Poor man's balancing" - send a digital signal on pin 17 to the battery charger to switch into constant voltage mode. Signal is triggered by
+//   the following logic:
+//   1. monitor all module voltages and look for the module with the lowest voltage (this is the minimum module voltage)
+//   2. check for modules with cell voltages >3.28V AND total voltage is >100mV higher than the minimum module voltage
+//   2. trigger balancing on any module where voltage is >100mV higher than the minimum module voltage AND 
+//      the identified module has a min cell voltage >3.28V
+//   3. maintain balancing until minimum module voltage is within 100mV of the identified balancing module
+//   This method of balancing (setting CV mode) relies on the voltage relaxation effect, this is expected to be very slow.
+//   While this balancing mode is on, the "over voltage" LED will flash. 
+//   *** NOT FULLY FUNCTIONAL *** The CV flag is not triggering correctly, and an unknown code change is giving an error in the EEPROM.
+//
 // MkII v.0.9
 // ----------
 // * Identified modules are listed by ID#, model type, and serial number during initial communications.
@@ -28,13 +41,14 @@
 //   NOTE: the BMS will not recognize _additional_ batteries added to the system after the initial setup, a power-cycle is required in this case.
 // * SOC reading shows correctly for all versions.
 //
-// * Wish list:
+// * To-do list:
 // * Ask user if they want to set a new ID; scan for input; if Yes, run the Set ID loop; if No or time-out, continue to run BMS algorithm
 // * Implement inter-module balancing.
 //   From the Valence user manual:
 //   "Inter module balancing is controlled by the U-BMS to compensate between different XP battery modules. This is active on modules with 
 //   minimum cell block above 3.28V and >100mV above the module terminal voltage. This means in a system of N modules the maximum number
 //   possible with interbalance active is N-1 and this decreases as balancing continues.​"
+// * Automatically set number of cells based on model type. This could be more effort than it's worth....
 //
 // MkII v.0.5
 // ----------
@@ -153,23 +167,24 @@
 // SECTION 1: Communication Setup and pin assignments
 //*******************************
 // Digital out pin numbers for external control
-#define EnableCharging 3
+#define EnableCharging 3 // green
 //#define InvertEnableCharging  // Invert = Low when enabled. Comment out for High when enabled. Daren: default is Inverted.
-#define EnableLoad 4
+#define EnableLoad 4 // green
 #define InvertEnableLoad  // Invert = Low when enabled. Comment out for High when enabled. Daren: default is not inverted.
 
 // Digital out pin numbers for external status display
 // High when triggered
-//#define UnderTemperatureWarning 16 // from "sarah" code, not implemented
-//#define UnderTemperatureShutdown 15 // from "sarah" code, not implemented
-#define OverTemperatureWarning 5
-#define OverTemperatureShutdown 6
-#define OverVoltageWarning 7
-#define OverVoltageShutdown 8
-#define UnderVoltageWarning 9
-#define UnderVoltageShutdown 10
+#define OverTemperatureWarning 5 // yellow
+#define OverTemperatureShutdown 6 // red
+#define OverVoltageWarning 7 // yellow; flashes when at least one module is in the balancing condition.
+#define OverVoltageShutdown 8 // red
+#define UnderVoltageWarning 9 // yellow
+#define UnderVoltageShutdown 10 // red
 #define CommsWarning 11     // Indicates at least 1 read error has occurred since system start
 #define CommsShutdown 12    // Indicates shutdown due to too many consecutive read errors
+//#define UnderTemperatureShutdown 15 // from "sarah" code, not implemented
+//#define UnderTemperatureWarning 16 // from "sarah" code, not implemented
+#define SetCVmode 17
 
 // If defined, the Warning status is turned off when in Shutdown status
 // This allows use of bi-colour LEDs for each Warning/Shutdown pair
@@ -200,21 +215,16 @@
 //**********************************
 // SECTION 2: BATTERY TYPE VARIABLES
 //**********************************
-// uint8_t batteries[] = {1, 8, 17, 18, 19, 20};  // All battery modules
 uint8_t batteries[49]; // battery id number, array is max 50 modules
 uint8_t moduleCount = 0;
-uint8_t FoundBattery[255];
+uint8_t FoundBattery[255]; // Battery IDs, 
 uint8_t newID = 0;
 uint8_t lastID = 0;
-//uint8_t batteries[moduleCount]; // battery id numbers in an array of moduleCount# elements
-#define NumberOfCells 6 // Need to find a way to calculate number of cells based on battery type
-uint8_t readBattID[] = {0x00, 0x10, 0x00, 0x00, 0x00, 0x01, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
-#define readBattIDResLen 16  // Length not confirmed
+#define NumberOfCells 6
 String model;
-/* 
- *  To do:
- *  Use IF statement to set number of cells based on model type
- */
+uint16_t MinVoltBattery = 99999;
+double SystemVoltage;
+
 //****************************
 // SECTION 3: ALARM THRESHOLDS
 //****************************
@@ -240,7 +250,7 @@ int16_t OT_Hysteresis = 200;    // Temperature of all cells must drop below thre
 
 // Over voltage thresholds (mV)
 // A shutdown condition disables charging
-int16_t cellOV_Warning = 3700;  // Valence U-BMS value = 3900
+int16_t cellOV_Warning = 3300;  // Valence U-BMS value = 3900
 int16_t cellOV_Shutdown = 3900; // Valence U-BMS value = 4000
 int16_t OV_Hysteresis = 200;    // Voltage of all cells must drop below threshold by this amount before warning/shutdown disabled
 
@@ -271,7 +281,7 @@ uint32_t lastDebugOutput;
 // Comms params
 uint32_t initialPause = 1000;    // How long to pause after sending wakeup / writeSingleCoil messages // works at 500ms, increasing to 1000ms pause increases reliability
 uint32_t readPause = 50;       // How long to wait after read request before trying to read response from battery // original value
-uint32_t loopPause = 100;      // How long to wait in between each loop of the batteries
+uint32_t loopPause = 10000;      // How long to wait in between each loop of the batteries
 unsigned int maxReadErrors = 2;     // Max number of consecutive loops in which read errors occurred, at which point charging and load is disabled
 unsigned int consecutiveReadErrorCount = 0;
 
@@ -286,23 +296,6 @@ uint8_t readTemps[] = {0x00, 0x03, 0x00, 0x50, 0x00, 0x07, 0x00, 0x00, 0x0d, 0x0
 #define readTempsResLen 21
 uint8_t readSNSOC[] = {0x00, 0x03, 0x00, 0x39, 0x00, 0x0a, 0x00, 0x00, 0x0d, 0x0a}; // DTop: works for Rev. 1 and Rev. 2 modules
 #define readSNSOCResLen 27
-/* 
- *  Hex to Decimal conversions:
- *  0x00: 0 - gets overwritten by the battery ID, batteries[i]
- *  0x03: 3
- *  0x00: 0
- *  0x6a: 106 or 0x39: 57
- *  0x00: 0
- *  0x0c: 12 or 0x0a: 10
- *  0x00: 0 - gets overwritten by ModRTU low byte
- *  0x00: 0 - gets overwritten by ModRTU high byte
- *  0x0d: 13
- *  0x10: 16
- *  0x0a: 10
- *  0x31: 49
- *  0xe0: 234
- *  0xee: 238
- */
 uint8_t readCurrent[] = {0x00, 0x03, 0x00, 0x39, 0x00, 0x0a, 0x00, 0x00, 0x0d, 0x0a};
 #define readCurrentResLen 27
 uint8_t readBalance[] = {0x00, 0x03, 0x00, 0x1e, 0x00, 0x01, 0x00, 0x00, 0x0d, 0x0a};
@@ -314,7 +307,7 @@ uint8_t readRevision[] = {0x00, 0x03, 0x00, 0xe0, 0x00, 0x16, 0x00, 0x00, 0x0d, 
 
 //***************************************************************
 //***************************************************************
-// Crelex parameters to implement in future code revisions
+// Crelex parameters for balancing commands (read-only?)
 //***************************************************************
 //***************************************************************
 uint8_t BalanceReadSend[] = {0x00, 0x03, 0x00, 0x5a, 0x00, 0x01, 0x00, 0x00, 0x0d, 0x0a};
@@ -326,29 +319,35 @@ uint8_t OpenBalancingRead[] = {0x00, 0x05, 0x00, 0x00, 0x10, 0x00, 0x00, 0x0d, 0
 unsigned short BalanceSelection; // Not sure what BalanceSelection is for or what it does, maybe selects which module to balance??
 uint8_t BatteryBalanceSend[] = {0x00, 0x10, 0x00, 0x20, 0x02, 0x00, 0x00, 0x00, 0x00, 0x0d, 0x0a}; // bitwise AND operator from BalanceSelection and 0xff
 #define BatteryBalanceSendLen 9 // Length not confirmed
+
+//****************************************************************************************************
+// Code from Valence Battery Reader for setting the module IDs, not ported yet
+//****************************************************************************************************
 //uint8_t SetNewID[] = {0x00, 0x10, 0x00, 0x00, 0x00, 0x01, 0x02, 0x00, 0x00, 0x00, 0x00, 0x0d, 0x0a};
 //      SetNewID[7] = (byte)Math.Round(Conversion.Int(Conversion.Val(NewID) / 256.0)),
 //      SetNewID[8] = (byte)Math.Round(Conversion.Val(NewID) % 256.0),
 //      SetNewID[9] = lowByte(ModRTU_CRC(SetNewID, 9));
 //      SetNewID[10] = highByte(ModRTU_CRC(SetNewID, 9));
 //      IDtemp = Conversions.ToInteger(NewID);
+//****************************************************************************************************
 
 // Status
+#define STATUS_CV 17
 //#define STATUS_UTW 16 // new "sarah" code, not implemented
 //#define STATUS_UTS 15 // new "sarah" code, not implemented
 #define STATUS_PO 14
 #define STATUS_ST 11
 #define STATUS_STC 10
-#define STATUS_EC 9 // green
-#define STATUS_EL 8 // green
-#define STATUS_OTW 7 // yellow
-#define STATUS_OTS 6 // red
-#define STATUS_OVW 5 // yellow
-#define STATUS_OVS 4 // red
-#define STATUS_UVW 3 // yellow
-#define STATUS_UVS 2 // red
-#define STATUS_CW 1 // yellow
-#define STATUS_CS 0 // red
+#define STATUS_EC 9
+#define STATUS_EL 8
+#define STATUS_OTW 7
+#define STATUS_OTS 6
+#define STATUS_OVW 5
+#define STATUS_OVS 4
+#define STATUS_UVW 3
+#define STATUS_UVS 2
+#define STATUS_CW 1
+#define STATUS_CS 0
 uint16_t previousStatus = 0;
 bool firstEventAfterPowerOn = 1;
 unsigned int nextEEPROMAddress;
@@ -381,6 +380,7 @@ void setup() {
     #ifdef InvertEnableLoad
         digitalWrite(EnableLoad, 1);
     #endif
+    pinMode(SetCVmode, OUTPUT);
 //    pinMode(UnderTemperatureWarning, OUTPUT); // new "sarah" code, not implemented
 //    pinMode(UnderTemperatureShutdown, OUTPUT); // new "sarah" code, not implemented
     pinMode(OverTemperatureWarning, OUTPUT);
@@ -480,7 +480,7 @@ void moduleSetup() {
 
     log("Searching for batteries...");
 
-    for (i = 0; i < sizeof(FoundBattery); i++) {
+    for (i = 0; i < sizeof(batteries); i++) {
     
         sprintf(battStr, "Found Battery ID %-5u", i);
         
@@ -647,14 +647,14 @@ void moduleSetup() {
       log("Modules: " +(String)moduleCount);
       logln("");
     }
-    balancing();
+//    balancing();
 }
 
 void balancing() {
 
-//****************************
+//****************************************************************
 // SECTION X: Untested code for battery balancing and setting IDs
-//****************************
+//****************************************************************
 
         uint8_t res[31];  // Longest response is 31 bytes
         uint32_t startTime, currentTime;
@@ -856,7 +856,7 @@ void balancing() {
 
 //**********************************************************************************
 //**********************************************************************************
-//Main loop
+// Main loop
 //**********************************************************************************
 //**********************************************************************************
 
@@ -882,6 +882,8 @@ void loop() {
     double soc = 0;
     int16_t current = 0;
     uint8_t balance = 0;
+    uint16_t BatteryVT[moduleCount] = {0}; // Daren: total voltage of each battery module, as an array
+    SystemVoltage = 0;
 
     // Sanity check if battery array is null, re-initialize if necessary
     if (moduleCount == 0) {
@@ -891,6 +893,7 @@ void loop() {
         // Header row
 
     if (debugLevel >= 2) {
+        logln("Size of BatteryVT: " +String(sizeof(BatteryVT))); //temp for debugging
         logln("             V1    V2    V3    V4    V5    V6    VT     T1   T2   T3   T4   T5   T6   PCBA SOC   CURRENT BAL");
     }
 
@@ -923,7 +926,7 @@ void loop() {
     // Iterate through all of the batteries connected to the BMS.
     for (i = 0; i < moduleCount; i++) {
         bool statusChangeTriggered = 0;
-
+        
         char battStr[14];
         sprintf(battStr, "Battery %-5u", batteries[i]);
     
@@ -960,14 +963,31 @@ void loop() {
                 logln("");
                 continue;
             }
+
+//            Original code, saved for reference
+//            volts[0] = (res[9] << 8) + res[10];  // V1
+//            volts[1] = (res[11] << 8) + res[12]; // V2
+//            volts[2] = (res[13] << 8) + res[14]; // V3
+//            volts[3] = (res[15] << 8) + res[16]; // V4
+//            volts[4] = (res[17] << 8) + res[18]; // V5
+//            volts[5] = (res[19] << 8) + res[20]; // V6
+
+            int res_m = 9;
+            int res_n = 10;
+
+            for (unsigned int j = 0; j < NumberOfCells; j++) {
+                volts[j] = (res[res_m] << 8) + res[res_n];
+                res_m += 2;
+                res_n += 2;
+                BatteryVT[i] += volts[j];
+            }
+
+            if (BatteryVT[i] < MinVoltBattery) {
+              MinVoltBattery = BatteryVT[i];
+            }
             
-            volts[0] = (res[9] << 8) + res[10];  // V1
-            volts[1] = (res[11] << 8) + res[12]; // V2
-            volts[2] = (res[13] << 8) + res[14]; // V3
-            volts[3] = (res[15] << 8) + res[16]; // V4
-            volts[4] = (res[17] << 8) + res[18]; // V5
-            volts[5] = (res[19] << 8) + res[20]; // V6
-            
+            SystemVoltage += BatteryVT[i];
+
             // Output voltages
             if (debugLevel >= 2) {
                 log(battStr);
@@ -988,7 +1008,7 @@ void loop() {
             } else {
                 // Currently in warning state
                 for (j = 0; j < NumberOfCells; j++) {
-                    if (volts[j] > cellOV_Warning-OV_Hysteresis) {
+                    if (volts[j] > cellOV_Warning - OV_Hysteresis) {
                         allClear_OverVoltageWarning = 0;
                     }
                 }
@@ -1004,7 +1024,7 @@ void loop() {
             } else {
                 // Currently in shutdown state
                 for (j = 0; j < NumberOfCells; j++) {
-                    if (volts[j] > cellOV_Shutdown-OV_Hysteresis) {
+                    if (volts[j] > cellOV_Shutdown - OV_Hysteresis) {
                         allClear_OverVoltageShutdown = 0;
                     }
                 }
@@ -1027,6 +1047,15 @@ void loop() {
                     }
                 }
             }
+
+            // Set balance on?
+            if (bitRead(previousStatus, STATUS_CV) == 0) {
+              if (BatteryVT[i] > MinVoltBattery+100) {
+                bitSet(currentStatus, STATUS_CV);
+//                statusChangeTriggered = 1;
+              }
+            }
+            
             if (bitRead(previousStatus, STATUS_UVS) == 0) {
                 // Currently no shutdown
                 for (j = 0; j < NumberOfCells; j++) {
@@ -1088,15 +1117,26 @@ void loop() {
                 logln("");
                 continue;
             }
+
+//            Original code for reference
+//            temps[0] = (res[5] << 8) + res[6];   // T1
+//            temps[1] = (res[7] << 8) + res[8];   // T2
+//            temps[2] = (res[9] << 8) + res[10];  // T3
+//            temps[3] = (res[11] << 8) + res[12]; // T4
+//            temps[4] = (res[13] << 8) + res[12]; // T5
+//            temps[5] = (res[15] << 8) + res[12]; // T6
+
+            int res_m = 5;
+            int res_n = 6;
+
+            for (unsigned int j = 0; j < NumberOfCells; j++) {
+                temps[j] = (res[res_m] << 8) + res[res_n];
+                res_m += 2;
+                res_n += 2;
+            }
             
-            temps[0] = (res[5] << 8) + res[6];   // T1
-            temps[1] = (res[7] << 8) + res[8];   // T2
-            temps[2] = (res[9] << 8) + res[10];  // T3
-            temps[3] = (res[11] << 8) + res[12]; // T4
-            temps[4] = (res[13] << 8) + res[12]; // T5
-            temps[5] = (res[15] << 8) + res[12]; // T6
-            temps[6] = (res[3] << 8) + res[4];   // PCBA
-            
+            temps[NumberOfCells] = (res[3] << 8) + res[4];   // PCBA
+
             // Output temperatures
             if (debugLevel >= 2) {
                 logTemps(temps);
@@ -1124,11 +1164,11 @@ void loop() {
                 // Currently in warning state
                 for (j = 0; j < NumberOfCells+1; j++) {
                     if (j < NumberOfCells) {
-                        if (temps[j] > cellOT_Warning-OT_Hysteresis) {
+                        if (temps[j] > cellOT_Warning - OT_Hysteresis) {
                             allClear_OverTemperatureWarning = 0;
                         }
                     } else {
-                        if (temps[j] > PCBAOT_Warning-OT_Hysteresis) {
+                        if (temps[j] > PCBAOT_Warning - OT_Hysteresis) {
                             allClear_OverTemperatureWarning = 0;
                         }
                     }
@@ -1153,11 +1193,11 @@ void loop() {
                 // Currently in shutdown state
                 for (j = 0; j < NumberOfCells+1; j++) {
                     if (j < NumberOfCells) {
-                        if (temps[j] > cellOT_Shutdown-OT_Hysteresis) {
+                        if (temps[j] > cellOT_Shutdown - OT_Hysteresis) {
                             allClear_OverTemperatureShutdown = 0;
                         }
                     } else {
-                        if (temps[j] > PCBAOT_Shutdown-OT_Hysteresis) {
+                        if (temps[j] > PCBAOT_Shutdown - OT_Hysteresis) {
                             allClear_OverTemperatureShutdown = 0;
                         }
                     }
@@ -1286,13 +1326,13 @@ void loop() {
             
             // Check SOC if in storage mode
             if (bitRead(previousStatus, STATUS_ST) == 1) {
-                if (soc <= storageMinSOC*10) {
+                if (soc <= storageMinSOC) {
                     reached_storageMinSOC = 1;
                     if (bitRead(previousStatus, STATUS_STC) == 0) {
                         bitSet(currentStatus, STATUS_STC);
                         statusChangeTriggered = 1;
                     }
-                } else if (soc >= storageMaxSOC*10) {
+                } else if (soc >= storageMaxSOC) {
                     reached_storageMaxSOC = 1;
                 }
             }
@@ -1425,6 +1465,23 @@ void loop() {
           }
        }
 
+// The following code formats the values in millivolts
+//
+//            char BattVTStr[7];
+//            sprintf(BattVTStr, "%-5u", BatteryVT[i]);
+//            char MinVoltStr[7];
+//            sprintf(MinVoltStr, "%-5u", MinVoltBattery);
+//
+//            log("Battery Voltage: " +String(BattVTStr));
+//            logln("");
+//            log("Min Voltage: " +String(MinVoltStr));
+//            logln("");
+
+// The following code formats the values in Volts
+            logSysVolt(SystemVoltage);
+//            logBattVolts(BatteryVT, i);
+            logMinVolt(MinVoltBattery);
+
     bool statusChangeTriggered = 0;
 
     // Change of charging state in storage mode?
@@ -1487,12 +1544,14 @@ void loop() {
     
     // Output current status
     if (debugLevel >= 2) {
-        logln("Current status:  ST   STC  EC   EL   OTW  OTS  OVW  OVS  UVW  UVS  CW   CS");
+        logln("Current status:  ST   STC  EC   EL   OTW  OTS  OVW  OVS  UVW  UVS  CW   CS   CV");
         log(  "                 ");
         logStatusLn(currentStatus);
         logln("");
     }
-    
+
+    // Output System Voltage
+    logSysVolt(SystemVoltage);
     
     // Set Warning/Shutdown output indicators
     #ifdef ShutdownTurnsOffWarning
@@ -1819,7 +1878,7 @@ void setECEL(uint16_t &currentStatus) {
 // Outputs info on status change, and records to EEPROM
 // If batteryId == 0 then volts, temps & soc are ignored
 void handleStatusChange(uint16_t currentStatus, uint8_t batteryId, int16_t volts[], int16_t temps[], uint16_t soc, int16_t current) {
-    logln("Status change triggered    ST   STC  EC   EL   OTW  OTS  OVW  OVS  UVW  UVS  CW   CS");
+    logln("Status change triggered    ST   STC  EC   EL   OTW  OTS  OVW  OVS  UVW  UVS  CW   CS   CV");
     log(  "Previous status:           ");
     logStatusLn(previousStatus);
     log(  "Current status:            ");
@@ -1852,16 +1911,6 @@ void handleStatusChange(uint16_t currentStatus, uint8_t batteryId, int16_t volts
     
         EEPROM.put(nextEEPROMAddress, batteryId);  // 1 byte
         nextEEPROMAddress += 1;
-
-//**************************************************************************
-// Experimental section to add the model number and revision number to the console output
-//**************************************************************************
-//        EEPROM.put(nextEEPROMAddress, model);  // 1 byte????
-//        nextEEPROMAddress += 1;
-//
-//        EEPROM.put(nextEEPROMAddress, SerNum);  // 1 byte????
-//        nextEEPROMAddress += 1;
-//**************************************************************************
     
         if (batteryId != 0) {
             unsigned int j;
@@ -1942,7 +1991,8 @@ void logStatusLn(uint16_t status) {
             String(bitRead(status, STATUS_OTW))+"    "+String(bitRead(status, STATUS_OTS))+"    "+
             String(bitRead(status, STATUS_OVW))+"    "+String(bitRead(status, STATUS_OVS))+"    "+
             String(bitRead(status, STATUS_UVW))+"    "+String(bitRead(status, STATUS_UVS))+"    "+
-            String(bitRead(status, STATUS_CW))+"    "+String(bitRead(status, STATUS_CS))
+            String(bitRead(status, STATUS_CW))+"    "+String(bitRead(status, STATUS_CS))+"    "+
+            String(bitRead(status, STATUS_CV))
     );
 }
 // Outputs volts and Vt
@@ -1957,6 +2007,34 @@ void logVolts(int16_t volts[]) {
     sprintf(str, "%-7.3f", total/1000.0);
     log(str);
 }
+
+// Outputs Battery volts
+void logBattVolts(int16_t BatteryVT[], int i) {
+    char str[7];
+    sprintf(str, "%-6.3f", BatteryVT[i]/1000.0);
+    log("Battery Voltage: ");
+    log(str);
+    logln("");
+}
+
+// Outputs Minimum Battery voltage
+void logMinVolt(int16_t MinVoltBattery) {
+    char str[7];
+    sprintf(str, "%-6.3f", MinVoltBattery/1000.0);
+    log("Minimum Voltage: ");
+    log(str);
+    logln("");
+}
+
+// Outputs System Voltage
+void logSysVolt(double SystemVoltage) {
+    char str[7];
+    sprintf(str, "%-6.3f", SystemVoltage/1000.0); // format as left-justified 5-digits wide, 0-digit precision, converting signed integer to decimal
+    log("Total System Voltage: ");
+    log(str);
+    logln("");
+}
+
 // Outputs temperatures
 void logTemps(int16_t temps[]) {
     char str[6];
@@ -1989,6 +2067,7 @@ void logBalance(uint8_t balance) {
     sprintf(str, "%-5d", balance); // format as left-justified 5-digits wide, 0-digit precision, converting signed integer to decimal
     log(str);
 }
+
 // Format time digit
 void printDigits(uint8_t n) {
     Console.print(":");
