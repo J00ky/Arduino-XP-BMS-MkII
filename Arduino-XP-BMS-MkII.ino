@@ -1,5 +1,5 @@
 // Arduino-XP-BMS-MkII 
-// Rev. 0.9.5 - 2022-01-04
+// Rev. 1.0 - 2022-01-14
 // -------------------------------
 // A BMS for Valence XP batteries, designed to run on Arduino or similar hardware.
 // Merger of original Seb code and Crelex's Valence Battery Reader code by Daren T.
@@ -18,6 +18,14 @@
 // \____/ .__/\__/_//_/_/|_/_/  /____/_/  /_/___/
 //     /_/
 // https://github.com/t3chN0Mad/OpenXPBMS
+//
+// MkII v.1.0
+// ----------
+// * Fixed the EEPROM error
+// * Fixed the CV flag not working
+// * Removed all old code sections not currently used
+// * Abandoned the Crelex code for balancing, the command doesn't seem to work even after
+//   trying every BalanceSelection parameter possible
 //
 // MkII v.0.9.5
 // ----------
@@ -60,6 +68,7 @@
 //     int16_t volts[6] = {0,0,0,0,0,0}; -> int16_t volts[4] = {0,0,0,0};
 //     int16_t temp[7] = {0,0,0,0,0,0,0}; -> int16_t temp[5] = {0,0,0,0,0};
 //   and remove V5, V6, T5, and T6 calculations and logln reports. This should work....
+//*****************************************************************************************************************************************
 //
 // Overview
 // --------
@@ -182,8 +191,6 @@
 #define UnderVoltageShutdown 10 // red
 #define CommsWarning 11     // Indicates at least 1 read error has occurred since system start
 #define CommsShutdown 12    // Indicates shutdown due to too many consecutive read errors
-//#define UnderTemperatureShutdown 15 // from "sarah" code, not implemented
-//#define UnderTemperatureWarning 16 // from "sarah" code, not implemented
 #define SetCVmode 17
 
 // If defined, the Warning status is turned off when in Shutdown status
@@ -222,24 +229,13 @@ uint8_t newID = 0;
 uint8_t lastID = 0;
 #define NumberOfCells 6
 String model;
-uint16_t MinVoltBattery = 99999;
+uint16_t MinVoltBattery = 50000;
+uint16_t newMinVolt;
 double SystemVoltage;
 
 //****************************
 // SECTION 3: ALARM THRESHOLDS
 //****************************
-//
-//
-//*************************************** new code from "sarah" to handle under temperature warning/shutdown ********************
-//// Under temperature thresholds (0.01C)
-//// A shutdown condition disables charging
-//int16_t cellUT_Warning = 2400;  // Valence U-BMS value = ????
-//int16_t cellUT_Shutdown = 700; // Valence U-BMS value = ????
-//int16_t PCBAUT_Warning = 2400;  // Valence U-BMS value = ????
-//int16_t PCBAUT_Shutdown = 700; // Valence U-BMS value = ????
-//int16_t UT_Hysteresis = 100;    // Temperature of all cells must Rise above threshold by this amount before warning/shutdown disabled
-//*******************************************************************************************************************************
-//
 // Over temperature thresholds (0.01C)
 // A shutdown condition disables charging and load
 int16_t cellOT_Warning = 5000;  // Valence U-BMS value = 6000
@@ -250,7 +246,7 @@ int16_t OT_Hysteresis = 200;    // Temperature of all cells must drop below thre
 
 // Over voltage thresholds (mV)
 // A shutdown condition disables charging
-int16_t cellOV_Warning = 3300;  // Valence U-BMS value = 3900
+int16_t cellOV_Warning = 3700;  // Valence U-BMS value = 3900
 int16_t cellOV_Shutdown = 3900; // Valence U-BMS value = 4000
 int16_t OV_Hysteresis = 200;    // Voltage of all cells must drop below threshold by this amount before warning/shutdown disabled
 
@@ -269,7 +265,6 @@ uint16_t storageMaxSOC = 50;     // Once charging is enabled, when at least 1 ba
 //****************************
 // SECTION 4: Software configuration parameters
 //****************************
-
 // Debug level
 #define InitialDebugLevel 1
 uint8_t debugLevel;
@@ -279,12 +274,12 @@ uint32_t lastDebugOutput;
 #define InitialMode 0
 
 // Comms params
-uint32_t initialPause = 1000;    // How long to pause after sending wakeup / writeSingleCoil messages // works at 500ms, increasing to 1000ms pause increases reliability
+uint32_t initialPause = 500;    // How long to pause after sending wakeup / writeSingleCoil messages // works at 500ms, increasing to 1000ms pause increases reliability
 uint32_t readPause = 50;       // How long to wait after read request before trying to read response from battery // original value
-uint32_t loopPause = 10000;      // How long to wait in between each loop of the batteries
+uint32_t loopPause = 100;      // How long to wait in between each loop of the batteries
 unsigned int maxReadErrors = 2;     // Max number of consecutive loops in which read errors occurred, at which point charging and load is disabled
 unsigned int consecutiveReadErrorCount = 0;
-
+//*********************************************************************************
 
 // Commands to send to the batteries.
 uint8_t messageW[] = {0x00, 0x00, 0x01, 0x01, 0xc0, 0x74, 0x0d, 0x0a, 0x00, 0x00};
@@ -304,37 +299,10 @@ uint8_t readModel[] = {0x00, 0x03, 0x00, 0xee, 0x00, 0x01, 0x00, 0x00, 0x0d, 0x0
 #define readModelResLen 9  // Length not confirmed, seems to work
 uint8_t readRevision[] = {0x00, 0x03, 0x00, 0xe0, 0x00, 0x16, 0x00, 0x00, 0x0d, 0x0a};
 #define readRevisionResLen 51  // Length not confirmed, seems to work
-
-//***************************************************************
-//***************************************************************
-// Crelex parameters for balancing commands (read-only?)
-//***************************************************************
-//***************************************************************
-uint8_t BalanceReadSend[] = {0x00, 0x03, 0x00, 0x5a, 0x00, 0x01, 0x00, 0x00, 0x0d, 0x0a};
-#define BalanceReadSendLen 9 // Length not confirmed
-uint8_t StopBalancingRead[] = {0x01, 0x05, 0x01, 0x00, 0x10, 0x00, 0x00, 0x0d, 0x0a};
-#define StopBalancingReadLen 9 // Length not confirmed
-uint8_t OpenBalancingRead[] = {0x00, 0x05, 0x00, 0x00, 0x10, 0x00, 0x00, 0x0d, 0x0a};
-#define OpenBalancingReadLen 9 // Length not confirmed
-unsigned short BalanceSelection; // Not sure what BalanceSelection is for or what it does, maybe selects which module to balance??
-uint8_t BatteryBalanceSend[] = {0x00, 0x10, 0x00, 0x20, 0x02, 0x00, 0x00, 0x00, 0x00, 0x0d, 0x0a}; // bitwise AND operator from BalanceSelection and 0xff
-#define BatteryBalanceSendLen 9 // Length not confirmed
-
-//****************************************************************************************************
-// Code from Valence Battery Reader for setting the module IDs, not ported yet
-//****************************************************************************************************
-//uint8_t SetNewID[] = {0x00, 0x10, 0x00, 0x00, 0x00, 0x01, 0x02, 0x00, 0x00, 0x00, 0x00, 0x0d, 0x0a};
-//      SetNewID[7] = (byte)Math.Round(Conversion.Int(Conversion.Val(NewID) / 256.0)),
-//      SetNewID[8] = (byte)Math.Round(Conversion.Val(NewID) % 256.0),
-//      SetNewID[9] = lowByte(ModRTU_CRC(SetNewID, 9));
-//      SetNewID[10] = highByte(ModRTU_CRC(SetNewID, 9));
-//      IDtemp = Conversions.ToInteger(NewID);
-//****************************************************************************************************
+uint8_t CVmodeFlag = 0;
 
 // Status
-#define STATUS_CV 17
-//#define STATUS_UTW 16 // new "sarah" code, not implemented
-//#define STATUS_UTS 15 // new "sarah" code, not implemented
+#define STATUS_CV 15
 #define STATUS_PO 14
 #define STATUS_ST 11
 #define STATUS_STC 10
@@ -360,6 +328,9 @@ unsigned int nextEEPROMAddress;
 #define numberOfMinutes(_time_) ((_time_ / SECS_PER_MIN) % SECS_PER_MIN)
 #define numberOfHours(_time_) (( _time_% SECS_PER_DAY) / SECS_PER_HOUR)
 #define numberOfDays(_time_) ( _time_ / SECS_PER_DAY)
+const long flashInterval = 500; // Used for flashing the LEDs
+bool CVledState = 0; // Constant voltage LED state
+unsigned long previousMillis = 0; // Timer for the LED flashin code
 
 // Console input buffer
 char input[32];
@@ -472,7 +443,6 @@ void moduleSetup() {
     char battStr[26];
     int a = 4;
 
-//    FoundBattery = 0;
     newID = 0;
     lastID = 0;
     moduleCount = 0;
@@ -635,7 +605,6 @@ void moduleSetup() {
         }
     }
 
-//    if (batteries[0] == 0 || lastID == 0) {
     if (batteries[0] == 0) {
       logln("No batteries detected! ");
       logln("Reinitialising comms...");
@@ -647,211 +616,6 @@ void moduleSetup() {
       log("Modules: " +(String)moduleCount);
       logln("");
     }
-//    balancing();
-}
-
-void balancing() {
-
-//****************************************************************
-// SECTION X: Untested code for battery balancing and setting IDs
-//****************************************************************
-
-        uint8_t res[31];  // Longest response is 31 bytes
-        uint32_t startTime, currentTime;
-        unsigned int i, j, bytesReceived;
-
-        //**************************** BalanceReadSend
-
-        BalanceReadSend[0] = 1;
-        BalanceReadSend[6] = lowByte(ModRTU_CRC(BalanceReadSend, 6));
-        BalanceReadSend[7] = highByte(ModRTU_CRC(BalanceReadSend, 6));
-
-        // Ensure read buffer is empty
-        while (RS485.available()) {
-            RS485.read();
-        }
-
-        writeToRS485(BalanceReadSend, sizeof(BalanceReadSend));
-
-        // Allow time for response
-        startTime = millis();
-        do {
-            currentTime = millis();
-        } while (currentTime - startTime < readPause);
-
-// Read in data from RS485 into received bytes
-        bytesReceived = RS485.available();
-          log("Bytes Received: " +(String)bytesReceived);
-          logln("");
-
-        if (bytesReceived == BalanceReadSendLen) {
-            for (j = 0; j < BalanceReadSendLen; j++) {
-                uint8_t b = RS485.read();
-                res[j] = b;
-            }
-        } else {
-          log("Invalid response to BalanceReadSend!");
-          logln("");
-        }
-        
-    int BalanceReadReturn; // originally a bool
-    if ((((int)res[3] * 256 + (int)res[4]) & 0x10) == 16) {
-      BalanceReadReturn = 0;
-    } else if ((((int)res[3] * 256 + (int)res[4]) & 0x10) == 0) {
-      BalanceReadReturn = 1;
-    } else {
-      BalanceReadReturn = -1;
-    }
-    log("BalanceReadReturn: " +(String)BalanceReadReturn);
-    logln("");
-    log("res values: " +(String)res[3] +"," +(String)res[4]);
-    logln("");
-
-    delay(5000);
-//
-//    //**************************** StopBalancingRead
-//
-//     StopBalancingRead[5] = lowByte(ModRTU_CRC(StopBalancingRead, 5));
-//     StopBalancingRead[6] = highByte(ModRTU_CRC(StopBalancingRead, 5));
-//    
-//        // Ensure read buffer is empty
-//        while (RS485.available()) {
-//            RS485.read();
-//        }
-//
-//        writeToRS485(StopBalancingRead, sizeof(StopBalancingRead));
-//
-//        // Allow time for response
-//        startTime = millis();
-//        do {
-//            currentTime = millis();
-//        } while (currentTime - startTime < readPause);
-//
-//// Read in data from RS485 into received bytes
-//        bytesReceived = RS485.available();
-//
-//        if (bytesReceived == StopBalancingReadLen) {
-//            for (j = 0; j < StopBalancingReadLen; j++) {
-//                uint8_t b = RS485.read();
-//                res[j] = b;
-//            }
-//        } else {
-//          log("Invalid response to StopBalancingRead!");
-//          logln("");
-//        }
-//        
-//    bool StopBalancingReturn;
-//    if (res[1] != 5) {
-//      StopBalancingReturn = 0;
-//    } else {
-//      StopBalancingReturn = 1;
-//    }
-//    log((String)StopBalancingReturn);
-//    logln("");
-//
-//    delay(10000);
-
-    //**************************** OpenBalancingRead
-
-     OpenBalancingRead[0] = 1;
-     OpenBalancingRead[5] = lowByte(ModRTU_CRC(OpenBalancingRead, 5));
-     OpenBalancingRead[6] = highByte(ModRTU_CRC(OpenBalancingRead, 5));
-
-        // Ensure read buffer is empty
-        while (RS485.available()) {
-            RS485.read();
-        }
-
-        writeToRS485(OpenBalancingRead, sizeof(OpenBalancingRead));
-
-        // Allow time for response
-        startTime = millis();
-        do {
-            currentTime = millis();
-        } while (currentTime - startTime < readPause);
-
-// Read in data from RS485 into received bytes
-        bytesReceived = RS485.available();
-          log("Bytes Received: " +(String)bytesReceived);
-          logln("");
-
-        if (bytesReceived == OpenBalancingReadLen) {
-            for (j = 0; j < OpenBalancingReadLen; j++) {
-                uint8_t b = RS485.read();
-                res[j] = b;
-            }
-        } else {
-          log("Invalid response to OpenBalancingRead!");
-          logln("");
-        }
-        
-    bool OpenBalancingReturn;
-    if (res[1] != 5) {
-      OpenBalancingReturn = 0;
-    } else {
-      OpenBalancingReturn = 1;;
-    }
-    log("OpenBalacingReturn: " +(String)OpenBalancingReturn);
-    logln("");
-
-    delay(5000);
-
-    //**************************** BatteryBalanceSend
-
-        BalanceSelection = 1;
-
-        BatteryBalanceSend[0] = 1;
-        BatteryBalanceSend[5] = BalanceSelection/256.0;
-        BatteryBalanceSend[6] = BalanceSelection & 0xff;
-        BatteryBalanceSend[7] = lowByte(ModRTU_CRC(BatteryBalanceSend, 7));
-        BatteryBalanceSend[8] = highByte(ModRTU_CRC(BatteryBalanceSend, 7));
-
-        log("BatteryBalanceSend values: " +(String)BatteryBalanceSend[5] +"," +(String)BatteryBalanceSend[6] +"," +(String)BatteryBalanceSend[7]);
-        logln("");
-
-        // Ensure read buffer is empty
-        while (RS485.available()) {
-            RS485.read();
-        }
-
-        writeToRS485(BatteryBalanceSend, sizeof(BatteryBalanceSend));
-
-        // Allow time for response
-        startTime = millis();
-        do {
-            currentTime = millis();
-        } while (currentTime - startTime < readPause);
-
-// Read in data from RS485 into received bytes
-        bytesReceived = RS485.available();
-          log("Bytes Received: " +(String)bytesReceived);
-          logln("");
-
-        if (bytesReceived == BatteryBalanceSendLen) {
-            for (j = 0; j < BatteryBalanceSendLen; j++) {
-                uint8_t b = RS485.read();
-                res[j] = b;
-            }
-        } else {
-          log("Invalid response to BatteryBalanceSend!");
-          logln("");
-        }
-        
-    int BatteryBalanceReturn; // originally a bool
-    if (res[1] != 16) {
-      BatteryBalanceReturn = 0;
-    } else if (res[3] == 32) {
-      BatteryBalanceReturn = 1;
-    } else {
-      BatteryBalanceReturn = -1;
-    }
-    log("BatteryBalaceReturn: " +(String)BatteryBalanceReturn);
-    logln("");
-    log("res values: " +(String)res[0] +"," +(String)res[1] +"," +(String)res[2] +"," +(String)res[3]);
-    logln("");
-
-    delay(10000);
-
 }
 
 //**********************************************************************************
@@ -870,8 +634,6 @@ void loop() {
     bool allClear_UnderVoltageShutdown = 1;
     bool allClear_OverTemperatureWarning = 1;
     bool allClear_OverTemperatureShutdown = 1;
-//    bool allClear_UnderTemperatureWarning = 1; // new "sarah" code, not implemented
-//    bool allClear_UnderTemperatureShutdown = 1; // new "sarah" code, not implemented
     bool reached_storageMinSOC = 0;
     bool reached_storageMaxSOC = 0;
     unsigned int readErrorCount = 0;
@@ -884,6 +646,7 @@ void loop() {
     uint8_t balance = 0;
     uint16_t BatteryVT[moduleCount] = {0}; // Daren: total voltage of each battery module, as an array
     SystemVoltage = 0;
+    MinVoltBattery = 64000;
 
     // Sanity check if battery array is null, re-initialize if necessary
     if (moduleCount == 0) {
@@ -893,29 +656,8 @@ void loop() {
         // Header row
 
     if (debugLevel >= 2) {
-        logln("Size of BatteryVT: " +String(sizeof(BatteryVT))); //temp for debugging
         logln("             V1    V2    V3    V4    V5    V6    VT     T1   T2   T3   T4   T5   T6   PCBA SOC   CURRENT BAL");
     }
-
-//***********************************************************************************************
-// Crelex code for setting and reading the battery IDs, not checked or incorporated at this time
-//***********************************************************************************************
-
-//
-//        public bool VerifySetID(object Buffer)
-//        {
-//            byte[] array = (byte[])Buffer;
-//            try
-//            {
-//                if (!((array[1] == 16) | (array[2] == 16)))
-//                {
-//                    return false;
-//                }
-//                bool result = true;
-//                ADDRESS = checked(IDtemp - 1);
-//                return result;
-//            }
-//        }
 
 //**************************************************************************************
 //**************************************************************************************
@@ -929,6 +671,7 @@ void loop() {
         
         char battStr[14];
         sprintf(battStr, "Battery %-5u", batteries[i]);
+        uint16_t MinCellVolt = 9999;
     
 //******************************************** Voltages ***********************************************
         
@@ -964,14 +707,6 @@ void loop() {
                 continue;
             }
 
-//            Original code, saved for reference
-//            volts[0] = (res[9] << 8) + res[10];  // V1
-//            volts[1] = (res[11] << 8) + res[12]; // V2
-//            volts[2] = (res[13] << 8) + res[14]; // V3
-//            volts[3] = (res[15] << 8) + res[16]; // V4
-//            volts[4] = (res[17] << 8) + res[18]; // V5
-//            volts[5] = (res[19] << 8) + res[20]; // V6
-
             int res_m = 9;
             int res_n = 10;
 
@@ -985,7 +720,11 @@ void loop() {
             if (BatteryVT[i] < MinVoltBattery) {
               MinVoltBattery = BatteryVT[i];
             }
-            
+
+//            if (MinVoltBattery > newMinVolt) {
+//              MinVoltBattery = BatteryVT[i];
+//            }
+
             SystemVoltage += BatteryVT[i];
 
             // Output voltages
@@ -1047,14 +786,22 @@ void loop() {
                     }
                 }
             }
-
+//****************************** set the CV mode flag on or off depending on voltage levels ***************************
             // Set balance on?
             if (bitRead(previousStatus, STATUS_CV) == 0) {
-              if (BatteryVT[i] > MinVoltBattery+100) {
+              if (BatteryVT[i] > newMinVolt+105 && MinCellVolt > 3280) {
                 bitSet(currentStatus, STATUS_CV);
-//                statusChangeTriggered = 1;
+                bitSet(CVmodeFlag, i);
+                statusChangeTriggered = 1;
+              } else {
+                bitClear(CVmodeFlag, i);
+              }
+            } else {
+              if (BatteryVT[i] < newMinVolt+95 || MinCellVolt < 3280) {
+                bitClear(CVmodeFlag, i);
               }
             }
+// ^^^^^^^^^^^ use 194 and 188 for debugging ^^^^^^^^^^
             
             if (bitRead(previousStatus, STATUS_UVS) == 0) {
                 // Currently no shutdown
@@ -1117,14 +864,6 @@ void loop() {
                 logln("");
                 continue;
             }
-
-//            Original code for reference
-//            temps[0] = (res[5] << 8) + res[6];   // T1
-//            temps[1] = (res[7] << 8) + res[8];   // T2
-//            temps[2] = (res[9] << 8) + res[10];  // T3
-//            temps[3] = (res[11] << 8) + res[12]; // T4
-//            temps[4] = (res[13] << 8) + res[12]; // T5
-//            temps[5] = (res[15] << 8) + res[12]; // T6
 
             int res_m = 5;
             int res_n = 6;
@@ -1204,68 +943,6 @@ void loop() {
                 }
             }
 
-////*************************************************** new code from "sarah" not implemented ******************************
-//            //under temperature?
-//            if (bitRead(previousStatus, STATUS_UTW) == 0) {
-//                // Currently no warning
-//                for (j = 0; j < NumberOfCells+1; j++) {
-//                    if (j < NumberOfCells) {
-//                        if (temps[j] < cellUT_Warning) {
-//                            bitSet(currentStatus, STATUS_UTW);
-//                            statusChangeTriggered = 1;
-//                        }
-//                    } else {
-//                        if (temps[j] < PCBAUT_Warning) {
-//                            bitSet(currentStatus, STATUS_UTW);
-//                            statusChangeTriggered = 1;
-//                        }
-//                    }
-//                }
-//            } else {
-//                // Currently in warning state
-//                for (j = 0; j < NumberOfCells+1; j++) {
-//                    if (j < NumberOfCells) {
-//                        if (temps[j] < cellUT_Warning+UT_Hysteresis) {
-//                            allClear_UnderTemperatureWarning = 0;
-//                        }
-//                    } else {
-//                        if (temps[j] < PCBAUT_Warning+UT_Hysteresis) {
-//                            allClear_UnderTemperatureWarning = 0;
-//                        }
-//                    }
-//                }
-//            }
-//            if (bitRead(previousStatus, STATUS_UTS) == 0) {
-//                // Currently no shutdown
-//                for (j = 0; j < NumberOfCells+1; j++) {
-//                    if (j < NumberOfCells) {
-//                        if (temps[j] < cellUT_Shutdown) {
-//                            bitSet(currentStatus, STATUS_UTS);
-//                            statusChangeTriggered = 1;
-//                        }
-//                    } else {
-//                        if (temps[j] < PCBAUT_Shutdown) {
-//                            bitSet(currentStatus, STATUS_UTS);
-//                            statusChangeTriggered = 1;
-//                        }
-//                    }
-//                }
-//            } else {
-//                // Currently in shutdown state
-//                for (j = 0; j < NumberOfCells+1; j++) {
-//                    if (j < NumberOfCells) {
-//                        if (temps[j] < cellUT_Shutdown+UT_Hysteresis) {
-//                            allClear_UnderTemperatureShutdown = 0;
-//                        }
-//                    } else {
-//                        if (temps[j] < PCBAUT_Shutdown+UT_Hysteresis) {
-//                            allClear_UnderTemperatureShutdown = 0;
-//                        }
-//                    }
-//                }
-//            }
-//
-
         } else { // Didn't receive expected response
             readErrorCount++;
             log(String(battStr) +"Invalid readTemps response: ");
@@ -1306,7 +983,6 @@ void loop() {
             }
         
             // Check response is as expected
-//            if (res[0] != batteries[i] || res[1] != 0x03 || res[2] != 0x18 || res[29] != 0x0d || res[30] != 0x0a) { // original seb code
             if (res[0] != batteries[i] || res[1] != 0x03) {
                 readErrorCount++;
                 log(String(battStr) +"Invalid readSNSOC response: ");
@@ -1317,7 +993,6 @@ void loop() {
             
 // State of charge calculation
             soc = (100 * res[16] / 255.0);   // Adapted from Crelex
-//            soc = (res[3] << 8) + res[4];   // SOC - original seb code
             
             // Output SOC
             if (debugLevel >= 2) {
@@ -1326,13 +1001,13 @@ void loop() {
             
             // Check SOC if in storage mode
             if (bitRead(previousStatus, STATUS_ST) == 1) {
-                if (soc <= storageMinSOC) {
+                if (soc <= storageMinSOC*10) {
                     reached_storageMinSOC = 1;
                     if (bitRead(previousStatus, STATUS_STC) == 0) {
                         bitSet(currentStatus, STATUS_STC);
                         statusChangeTriggered = 1;
                     }
-                } else if (soc >= storageMaxSOC) {
+                } else if (soc >= storageMaxSOC*10) {
                     reached_storageMaxSOC = 1;
                 }
             }
@@ -1399,6 +1074,8 @@ void loop() {
             }
             continue;
         }
+
+//***************************************************** Balance ********************************************************
         
         // Ensure read buffer is empty
         while (RS485.available()) {
@@ -1465,23 +1142,7 @@ void loop() {
           }
        }
 
-// The following code formats the values in millivolts
-//
-//            char BattVTStr[7];
-//            sprintf(BattVTStr, "%-5u", BatteryVT[i]);
-//            char MinVoltStr[7];
-//            sprintf(MinVoltStr, "%-5u", MinVoltBattery);
-//
-//            log("Battery Voltage: " +String(BattVTStr));
-//            logln("");
-//            log("Min Voltage: " +String(MinVoltStr));
-//            logln("");
-
-// The following code formats the values in Volts
-            logSysVolt(SystemVoltage);
-//            logBattVolts(BatteryVT, i);
-            logMinVolt(MinVoltBattery);
-
+    newMinVolt = MinVoltBattery;
     bool statusChangeTriggered = 0;
 
     // Change of charging state in storage mode?
@@ -1517,6 +1178,11 @@ void loop() {
         bitClear(currentStatus, STATUS_OTS);
         statusChangeTriggered = 1;
     }
+    if (bitRead(previousStatus, STATUS_CV) == 1 && CVmodeFlag == 0) {
+        bitClear(currentStatus, STATUS_CV);
+        statusChangeTriggered = 1;
+    }
+// This seems to flip the flag off incorrectly, needs debugging
     
     // Handle communication errors
     if (readErrorCount == 0) {
@@ -1550,9 +1216,11 @@ void loop() {
         logln("");
     }
 
-    // Output System Voltage
-    logSysVolt(SystemVoltage);
-    
+    // Output System and Lowest Battery Voltage
+        logSysVolt(SystemVoltage);
+//        logBattVolts(BatteryVT, i);
+        logMinVolt(MinVoltBattery);
+
     // Set Warning/Shutdown output indicators
     #ifdef ShutdownTurnsOffWarning
         digitalWrite(OverVoltageWarning, bitRead(currentStatus, STATUS_OVW) && !bitRead(currentStatus, STATUS_OVS));
@@ -1569,6 +1237,28 @@ void loop() {
     digitalWrite(UnderVoltageShutdown, bitRead(currentStatus, STATUS_UVS));
     digitalWrite(OverTemperatureShutdown, bitRead(currentStatus, STATUS_OTS));
     digitalWrite(CommsShutdown, bitRead(currentStatus, STATUS_CS));
+    digitalWrite(SetCVmode, bitRead(currentStatus, STATUS_CV));
+
+//    ********************* Flashing LED code for CV mode *****************************
+
+    unsigned long currentMillis = millis();
+    
+    if (bitRead(currentStatus, STATUS_CV) && currentMillis - previousMillis >= flashInterval) {
+      if (CVledState == 0) {
+        CVledState = 1;
+        digitalWrite(OverVoltageWarning, CVledState);
+      } else {
+        for (int j = 0; j < 3; j++) {
+          digitalWrite(OverVoltageWarning, CVledState);
+          CVledState = !CVledState;
+          delay(50);
+        }
+      }
+      previousMillis = currentMillis;
+    } else if (!bitRead(currentStatus, STATUS_CV) && !bitRead(currentStatus, STATUS_OVW)) {
+      CVledState = 0;
+      digitalWrite(OverVoltageWarning, CVledState);
+    }
     
 
     // debugLevel 21->1
@@ -1985,7 +1675,7 @@ void logBytes() {
     }
 }
 // Outputs status bitmap
-void logStatusLn(uint16_t status) {
+void logStatusLn(uint32_t status) {
     logln(  String(bitRead(status, STATUS_ST))+"    "+String(bitRead(status, STATUS_STC))+"    "+
             String(bitRead(status, STATUS_EC))+"    "+String(bitRead(status, STATUS_EL))+"    "+
             String(bitRead(status, STATUS_OTW))+"    "+String(bitRead(status, STATUS_OTS))+"    "+
@@ -2018,7 +1708,7 @@ void logBattVolts(int16_t BatteryVT[], int i) {
 }
 
 // Outputs Minimum Battery voltage
-void logMinVolt(int16_t MinVoltBattery) {
+void logMinVolt(uint16_t MinVoltBattery) {
     char str[7];
     sprintf(str, "%-6.3f", MinVoltBattery/1000.0);
     log("Minimum Voltage: ");
