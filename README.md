@@ -1,5 +1,5 @@
 Arduino-XP-BMS-MkII 
-Rev. 0.9 - 2021-12-11
+Rev. 1.0 - 2022-01-14
 -------------------------------
 A BMS for Valence XP batteries, designed to run on Arduino or similar hardware.
 Merger of original Seb code and portions of Crelex's Valence Battery Reader code by Daren T.
@@ -18,6 +18,15 @@ The MkII version of the Arduino XP BMS has the following features:
 * Identified modules are listed by ID#, model type, and serial number during initial communications.
 * Compatible for Rev. 1 (black) and Rev. 2 (green) models.
 * Any comms failure, including BMS disconnection, will result in BMS sending the wakeup command but battery system config info is retained for faster system recovery.
+* "Poor man's balancing" - send a digital signal on pin 17 to the battery charger to switch into constant voltage mode. Signal is triggered by
+  the following logic:
+  1. monitor all module voltages and look for the module with the lowest voltage (this is the minimum module voltage)
+  2. check for modules with cell voltages >3.28V AND total voltage is >100mV higher than the minimum module voltage
+  2. trigger balancing on any module where voltage is >100mV higher than the minimum module voltage AND 
+     the identified module has a min cell voltage >3.28V
+  3. maintain balancing until minimum module voltage is within 100mV of the identified balancing module
+  This method of balancing (setting CV mode) relies on the voltage relaxation effect, this is expected to be very slow.
+  While this balancing mode is on, the "over voltage" LED will flash. 
 
 Still designed to provide monitoring of Valence XP batteries in order to:
 * Keep the Valence internal BMS awake so the intra-module balancing is active.
@@ -29,7 +38,7 @@ Still designed to provide monitoring of Valence XP batteries in order to:
 
 Current Limitations
 -------------------
-* Does not handle inter-battery balancing, so only suitable for parallel installations. Balancing code still needs debugging.
+* Does not handle true inter-battery balancing, so only suitable for parallel installations. Balancing code still needs debugging.
 * Only up to 6 cell / 19V batteries.
 * Low temperature checking code added but not implemented or validated.
 
